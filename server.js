@@ -7,25 +7,39 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { Pool } = require("pg");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
 
 const app = express();
+
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: false,
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+});
+app.use("/api/", limiter);
+
+// Configuration
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 150 * 1024 * 1024 },
+  limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024 },
 });
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "brain-vision-secret";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 
-// Configuration PostgreSQL
+// PostgreSQL configuration
 const isProduction = process.env.NODE_ENV === "production";
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ...(isProduction && {
-    ssl: {
-      rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false }
   })
 });
 
@@ -122,6 +136,7 @@ async function initDatabase() {
       title VARCHAR(255) NOT NULL,
       description TEXT,
       cover_url TEXT,
+      status VARCHAR(50) DEFAULT 'draft',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
     
@@ -161,6 +176,8 @@ async function initDatabase() {
     `CREATE TABLE IF NOT EXISTS enrollments (
       user_id INT REFERENCES users(id) ON DELETE CASCADE,
       course_id INT REFERENCES courses(id) ON DELETE CASCADE,
+      progress DECIMAL(5,2) DEFAULT 0,
+      completed_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (user_id, course_id)
     )`,
@@ -191,7 +208,7 @@ async function initDatabase() {
     try {
       await pool.query(sql);
     } catch (error) {
-      console.error(`[DB] Erreur lors de la création d'une table:`, error.message);
+      console.error(`[DB] Erreur:`, error.message);
     }
   }
   
@@ -224,82 +241,90 @@ async function seedDemo() {
     
     const promoterId = usersResult.rows.find(u => u.role === "promoter").id;
     const teacherId = usersResult.rows.find(u => u.role === "teacher").id;
+    const studentId = usersResult.rows.find(u => u.role === "student").id;
     
     // Créer un module
     const moduleResult = await pool.query(
       `INSERT INTO modules (title, description, level, certificate_threshold, created_by)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      ["Intelligence Artificielle", "Decouvrez les fondamentaux de l'IA", "Debutant", 70, promoterId]
+      ["Développement Web Moderne", "Maîtrisez les fondamentaux du développement web", "Debutant", 70, promoterId]
     );
     const moduleId = moduleResult.rows[0].id;
     
     // Créer un cours
     const courseResult = await pool.query(
-      `INSERT INTO courses (module_id, teacher_id, title, description)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO courses (module_id, teacher_id, title, description, status)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [moduleId, teacherId, "Introduction au Machine Learning", "Apprenez les bases du ML"]
+      [moduleId, teacherId, "HTML5 & CSS3 Avancé", "Apprenez à créer des sites web modernes et responsives", "published"]
     );
     const courseId = courseResult.rows[0].id;
     
-    // Créer des leçons
-    const lessonsResult = await pool.query(
-      `INSERT INTO lessons (course_id, title, summary, content_type, content_url, position) VALUES
-        ($1, $2, $3, $4, $5, 1),
-        ($1, $6, $7, $8, $9, 2)
-       RETURNING id, position`,
-      [
-        courseId,
-        "Introduction a l'IA", "Histoire et concepts fondamentaux", "pdf", 
-        "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-        "Les algorithmes de base", "Decouverte des algorithmes essentiels", "video",
-        "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"
-      ]
+    // Inscrire l'étudiant
+    await pool.query(
+      "INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2)",
+      [studentId, courseId]
     );
     
-    // Créer des évaluations pour chaque leçon
-    for (const lesson of lessonsResult.rows) {
-      const evalTitle = lesson.position === 1 ? "Quiz Introduction" : "Quiz Algorithmes";
-      const evaluationResult = await pool.query(
-        `INSERT INTO evaluations (lesson_id, title, pass_score) 
-         VALUES ($1, $2, $3) 
+    // Créer des leçons avec évaluations
+    const lessons = [
+      { title: "Introduction au HTML5", summary: "Les bases du HTML5 et sa structure", type: "pdf", url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", position: 1 },
+      { title: "Les sélecteurs CSS", summary: "Maîtrisez les sélecteurs CSS pour un design parfait", type: "video", url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", position: 2 },
+      { title: "Flexbox et Grid", summary: "Créez des layouts modernes et responsives", type: "pdf", url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", position: 3 }
+    ];
+    
+    for (const lesson of lessons) {
+      const lessonResult = await pool.query(
+        `INSERT INTO lessons (course_id, title, summary, content_type, content_url, position)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
-        [lesson.id, evalTitle, 60]
+        [courseId, lesson.title, lesson.summary, lesson.type, lesson.url, lesson.position]
       );
-      const evaluationId = evaluationResult.rows[0].id;
+      const lessonId = lessonResult.rows[0].id;
       
-      // Ajouter des questions
-      await pool.query(
-        `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
-          ($1, $2, $3, $4, $5, $6, $7, 1),
-          ($1, $8, $9, $10, $11, $12, $13, 1)`,
-        [
-          evaluationId,
-          "Qu'est-ce que l'intelligence artificielle ?", 
-          "Un systeme qui imite l'intelligence humaine", 
-          "Un type de base de donnees", 
-          "Un langage de programmation", 
-          "Un navigateur web", 
-          "A",
-          "Le Machine Learning est une sous-categorie de...",
-          "La robotique",
-          "L'intelligence artificielle",
-          "Le big data",
-          "Le cloud computing",
-          "B"
-        ]
+      // Créer une évaluation pour chaque leçon
+      const evalResult = await pool.query(
+        `INSERT INTO evaluations (lesson_id, title, pass_score)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [lessonId, `Quiz - ${lesson.title}`, 60]
       );
+      const evaluationId = evalResult.rows[0].id;
+      
+      // Ajouter des questions spécifiques à chaque leçon
+      if (lesson.position === 1) {
+        await pool.query(
+          `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
+            ($1, 'Que signifie HTML ?', 'Hyper Text Markup Language', 'High Tech Modern Language', 'Hyper Transfer Markup Language', 'Home Tool Markup Language', 'A', 1),
+            ($1, 'Quelle balise HTML est utilisée pour créer un lien ?', '<link>', '<a>', '<href>', '<url>', 'B', 1)`,
+          [evaluationId]
+        );
+      } else if (lesson.position === 2) {
+        await pool.query(
+          `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
+            ($1, 'Comment sélectionne-t-on un élément par son ID en CSS ?', '.monId', '#monId', '*monId', 'monId', 'B', 1),
+            ($1, 'Quelle propriété CSS permet de changer la couleur du texte ?', 'background-color', 'text-color', 'color', 'font-color', 'C', 1)`,
+          [evaluationId]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
+            ($1, 'Que permet Flexbox de faire ?', 'Créer des grilles complexes', 'Disposer des éléments en ligne ou colonne', 'Gérer les images', 'Animer des éléments', 'B', 1),
+            ($1, 'Quelle propriété CSS Grid définit les colonnes ?', 'grid-template-columns', 'grid-columns', 'grid-template', 'grid-col', 'A', 1)`,
+          [evaluationId]
+        );
+      }
     }
     
     console.log("[SEED] ✓ Données créées avec succès");
   } catch (error) {
-    console.error("[SEED] Erreur lors du seeding:", error.message);
-    // Ne pas bloquer le démarrage si le seeding échoue
+    console.error("[SEED] Erreur:", error.message);
   }
 }
 
-// Routes API
+// ==================== ROUTES API ====================
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -359,14 +384,31 @@ app.get("/api/dashboard", auth(), asyncHandler(async (req, res) => {
     pool.query("SELECT COUNT(*) FROM certificates")
   ]);
   
-  const latest = await pool.query(
-    `SELECT c.id, c.title, c.description, m.title AS module_title, u.name AS teacher_name
-     FROM courses c
-     JOIN modules m ON m.id = c.module_id
-     LEFT JOIN users u ON u.id = c.teacher_id
-     ORDER BY c.created_at DESC
-     LIMIT 6`
-  );
+  let latest = [];
+  
+  if (req.user.role === "student") {
+    latest = await pool.query(
+      `SELECT c.id, c.title, c.description, m.title AS module_title, u.name AS teacher_name,
+       e.progress, e.completed_at
+       FROM enrollments e
+       JOIN courses c ON c.id = e.course_id
+       JOIN modules m ON m.id = c.module_id
+       LEFT JOIN users u ON u.id = c.teacher_id
+       WHERE e.user_id = $1
+       ORDER BY e.created_at DESC
+       LIMIT 6`,
+      [req.user.id]
+    );
+  } else {
+    latest = await pool.query(
+      `SELECT c.id, c.title, c.description, m.title AS module_title, u.name AS teacher_name
+       FROM courses c
+       JOIN modules m ON m.id = c.module_id
+       LEFT JOIN users u ON u.id = c.teacher_id
+       ORDER BY c.created_at DESC
+       LIMIT 6`
+    );
+  }
   
   res.json({
     stats: {
@@ -375,14 +417,18 @@ app.get("/api/dashboard", auth(), asyncHandler(async (req, res) => {
       lessons: parseInt(lessonsCount.rows[0].count),
       certificates: parseInt(certificatesCount.rows[0].count)
     },
-    latest: latest.rows
+    latest: latest.rows,
+    userRole: req.user.role
   });
 }));
 
-// Modules
+// Modules (Promoteur only)
 app.get("/api/modules", auth(), asyncHandler(async (req, res) => {
   const modules = await pool.query(
-    `SELECT m.*, COUNT(DISTINCT c.id) AS course_count, COUNT(DISTINCT cert.id) AS certificate_count
+    `SELECT m.*, COUNT(DISTINCT c.id) AS course_count, COUNT(DISTINCT cert.id) AS certificate_count,
+     (SELECT COUNT(*) FROM enrollments e 
+      JOIN courses c2 ON c2.id = e.course_id 
+      WHERE c2.module_id = m.id) AS student_count
      FROM modules m
      LEFT JOIN courses c ON c.module_id = m.id
      LEFT JOIN certificates cert ON cert.module_id = m.id
@@ -395,30 +441,59 @@ app.get("/api/modules", auth(), asyncHandler(async (req, res) => {
 app.post("/api/modules", auth(["promoter"]), asyncHandler(async (req, res) => {
   const { title, description, level, certificate_threshold } = req.body;
   
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO modules (title, description, level, certificate_threshold, created_by)
-     VALUES ($1, $2, $3, $4, $5)`,
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
     [title, description || "", level || "Debutant", Number(certificate_threshold) || 70, req.user.id]
   );
   
-  res.status(201).json({ message: "Module créé avec succès" });
+  res.status(201).json({ message: "Module créé avec succès", moduleId: result.rows[0].id });
 }));
 
-// Courses
+app.put("/api/modules/:id", auth(["promoter"]), asyncHandler(async (req, res) => {
+  const { title, description, level, certificate_threshold } = req.body;
+  
+  await pool.query(
+    `UPDATE modules 
+     SET title = $1, description = $2, level = $3, certificate_threshold = $4
+     WHERE id = $5`,
+    [title, description, level, certificate_threshold, req.params.id]
+  );
+  
+  res.json({ message: "Module mis à jour" });
+}));
+
+app.delete("/api/modules/:id", auth(["promoter"]), asyncHandler(async (req, res) => {
+  await pool.query("DELETE FROM modules WHERE id = $1", [req.params.id]);
+  res.json({ message: "Module supprimé" });
+}));
+
+// Courses (Teacher)
 app.get("/api/courses", auth(), asyncHandler(async (req, res) => {
-  const courses = await pool.query(
-    `SELECT c.*, m.title AS module_title, u.name AS teacher_name,
+  let query_text = `
+    SELECT c.*, m.title AS module_title, u.name AS teacher_name,
      COUNT(DISTINCT l.id) AS lesson_count,
-     EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.user_id = $1) AS enrolled
+     COUNT(DISTINCT e.user_id) AS enrolled_count,
+     EXISTS(SELECT 1 FROM enrollments e2 WHERE e2.course_id = c.id AND e2.user_id = $1) AS enrolled,
+     COALESCE(e3.progress, 0) AS my_progress
      FROM courses c
      JOIN modules m ON m.id = c.module_id
      LEFT JOIN users u ON u.id = c.teacher_id
      LEFT JOIN lessons l ON l.course_id = c.id
-     WHERE ($2 = 0 OR c.teacher_id = $1)
-     GROUP BY c.id, m.title, u.name
-     ORDER BY c.created_at DESC`,
-    [req.user.id, req.user.role === "teacher" ? 1 : 0]
-  );
+     LEFT JOIN enrollments e3 ON e3.course_id = c.id AND e3.user_id = $1
+  `;
+  
+  const params = [req.user.id];
+  
+  if (req.user.role === "teacher") {
+    query_text += ` WHERE c.teacher_id = $2`;
+    params.push(req.user.id);
+  }
+  
+  query_text += ` GROUP BY c.id, m.title, u.name, e3.progress ORDER BY c.created_at DESC`;
+  
+  const courses = await pool.query(query_text, params);
   res.json(courses.rows);
 }));
 
@@ -431,31 +506,55 @@ app.post("/api/courses", auth(["teacher"]), upload.single("cover"), asyncHandler
     coverUrl = asset.url;
   }
   
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO courses (module_id, teacher_id, title, description, cover_url)
-     VALUES ($1, $2, $3, $4, $5)`,
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
     [module_id, req.user.id, title, description || "", coverUrl]
   );
   
-  res.status(201).json({ message: "Cours créé avec succès" });
+  res.status(201).json({ message: "Cours créé avec succès", courseId: result.rows[0].id });
+}));
+
+app.put("/api/courses/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
+  const { title, description, status } = req.body;
+  
+  await pool.query(
+    `UPDATE courses 
+     SET title = $1, description = $2, status = $3
+     WHERE id = $4 AND teacher_id = $5`,
+    [title, description, status, req.params.id, req.user.id]
+  );
+  
+  res.json({ message: "Cours mis à jour" });
 }));
 
 app.post("/api/courses/:id/enroll", auth(["student"]), asyncHandler(async (req, res) => {
-  await pool.query(
-    "INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+  // Vérifier si déjà inscrit
+  const existing = await pool.query(
+    "SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2",
     [req.user.id, req.params.id]
   );
+  
+  if (existing.rows.length === 0) {
+    await pool.query(
+      "INSERT INTO enrollments (user_id, course_id, progress) VALUES ($1, $2, 0)",
+      [req.user.id, req.params.id]
+    );
+  }
+  
   res.json({ message: "Inscription confirmée" });
 }));
 
 app.get("/api/courses/:id", auth(), asyncHandler(async (req, res) => {
   const courseResult = await pool.query(
-    `SELECT c.*, m.title AS module_title, m.certificate_threshold, u.name AS teacher_name
+    `SELECT c.*, m.title AS module_title, m.certificate_threshold, u.name AS teacher_name,
+     (SELECT progress FROM enrollments WHERE user_id = $1 AND course_id = c.id) AS my_progress
      FROM courses c
      JOIN modules m ON m.id = c.module_id
      LEFT JOIN users u ON u.id = c.teacher_id
-     WHERE c.id = $1`,
-    [req.params.id]
+     WHERE c.id = $2`,
+    [req.user.id, req.params.id]
   );
   
   if (courseResult.rows.length === 0) {
@@ -464,7 +563,8 @@ app.get("/api/courses/:id", auth(), asyncHandler(async (req, res) => {
   
   const lessons = await pool.query(
     `SELECT l.*, e.id AS evaluation_id, e.title AS evaluation_title, e.pass_score,
-     s.score AS student_score, s.submitted_at
+     s.score AS student_score, s.submitted_at,
+     CASE WHEN s.score >= e.pass_score THEN true ELSE false END AS is_validated
      FROM lessons l
      LEFT JOIN evaluations e ON e.lesson_id = l.id
      LEFT JOIN submissions s ON s.lesson_id = l.id AND s.user_id = $1
@@ -476,11 +576,10 @@ app.get("/api/courses/:id", auth(), asyncHandler(async (req, res) => {
   res.json({ course: courseResult.rows[0], lessons: lessons.rows });
 }));
 
-// Lessons
+// Lessons (Teacher)
 app.post("/api/courses/:id/lessons", auth(["teacher"]), upload.single("content"), asyncHandler(async (req, res) => {
   const { title, summary, content_type, position } = req.body;
   
-  // Vérifier que l'enseignant possède le cours
   const ownership = await pool.query(
     "SELECT id FROM courses WHERE id = $1 AND teacher_id = $2",
     [req.params.id, req.user.id]
@@ -494,18 +593,41 @@ app.post("/api/courses/:id/lessons", auth(["teacher"]), upload.single("content")
     return res.status(400).json({ message: "Type de contenu invalide" });
   }
   
+  if (!req.file) {
+    return res.status(400).json({ message: "Fichier requis" });
+  }
+  
   const asset = await uploadAsset(req.file, content_type);
   
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO lessons (course_id, title, summary, content_type, content_url, public_id, position)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id`,
     [req.params.id, title, summary || "", content_type, asset.url, asset.publicId, Number(position) || 1]
   );
   
-  res.status(201).json({ message: "Leçon ajoutée avec succès" });
+  res.status(201).json({ message: "Leçon ajoutée avec succès", lessonId: result.rows[0].id });
 }));
 
-// Evaluations
+app.put("/api/lessons/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
+  const { title, summary, position } = req.body;
+  
+  await pool.query(
+    `UPDATE lessons 
+     SET title = $1, summary = $2, position = $3
+     WHERE id = $4`,
+    [title, summary, position, req.params.id]
+  );
+  
+  res.json({ message: "Leçon mise à jour" });
+}));
+
+app.delete("/api/lessons/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
+  await pool.query("DELETE FROM lessons WHERE id = $1", [req.params.id]);
+  res.json({ message: "Leçon supprimée" });
+}));
+
+// Evaluations (Teacher)
 app.post("/api/lessons/:id/evaluation", auth(["teacher"]), asyncHandler(async (req, res) => {
   const { title, pass_score, questions } = req.body;
   
@@ -524,7 +646,6 @@ app.post("/api/lessons/:id/evaluation", auth(["teacher"]), asyncHandler(async (r
     return res.status(400).json({ message: "Ajoutez au moins une question" });
   }
   
-  // Upsert evaluation
   await pool.query(
     `INSERT INTO evaluations (lesson_id, title, pass_score)
      VALUES ($1, $2, $3)
@@ -539,10 +660,8 @@ app.post("/api/lessons/:id/evaluation", auth(["teacher"]), asyncHandler(async (r
   );
   const evaluationId = evaluationResult.rows[0].id;
   
-  // Supprimer les anciennes questions
   await pool.query("DELETE FROM questions WHERE evaluation_id = $1", [evaluationId]);
   
-  // Ajouter les nouvelles questions
   for (const item of questions) {
     await pool.query(
       `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points)
@@ -573,17 +692,30 @@ app.get("/api/lessons/:id/evaluation", auth(), asyncHandler(async (req, res) => 
     return res.status(404).json({ message: "Aucune évaluation disponible" });
   }
   
+  const evaluation = evaluationResult.rows[0];
+  
+  const submission = await pool.query(
+    "SELECT * FROM submissions WHERE user_id = $1 AND lesson_id = $2",
+    [req.user.id, req.params.id]
+  );
+  
   const questions = await pool.query(
     `SELECT id, question, option_a, option_b, option_c, option_d, points
      FROM questions 
      WHERE evaluation_id = $1 
      ORDER BY id ASC`,
-    [evaluationResult.rows[0].id]
+    [evaluation.id]
   );
   
-  res.json({ evaluation: evaluationResult.rows[0], questions: questions.rows });
+  res.json({ 
+    evaluation, 
+    questions: questions.rows,
+    hasSubmitted: submission.rows.length > 0,
+    previousScore: submission.rows[0]?.score
+  });
 }));
 
+// Submit evaluation (Student)
 app.post("/api/lessons/:id/submit", auth(["student"]), asyncHandler(async (req, res) => {
   const { answers } = req.body;
   
@@ -604,15 +736,18 @@ app.post("/api/lessons/:id/submit", auth(["student"]), asyncHandler(async (req, 
   
   let total = 0;
   let earned = 0;
+  let correctCount = 0;
   
   for (const q of questions.rows) {
     total += q.points;
     if (answers && answers[q.id] === q.correct_option) {
       earned += q.points;
+      correctCount++;
     }
   }
   
   const score = total > 0 ? Math.round((earned / total) * 100) : 0;
+  const passed = score >= evaluation.pass_score;
   
   await pool.query(
     `INSERT INTO submissions (user_id, lesson_id, evaluation_id, score, answers)
@@ -622,10 +757,45 @@ app.post("/api/lessons/:id/submit", auth(["student"]), asyncHandler(async (req, 
     [req.user.id, req.params.id, evaluation.id, score, JSON.stringify(answers || {})]
   );
   
-  res.json({ score, passed: score >= evaluation.pass_score });
+  const lessonResult = await pool.query(
+    "SELECT course_id FROM lessons WHERE id = $1",
+    [req.params.id]
+  );
+  const courseId = lessonResult.rows[0].course_id;
+  
+  const progressResult = await pool.query(
+    `SELECT 
+       COUNT(l.id) AS total_lessons,
+       COUNT(s.id) AS completed_lessons,
+       AVG(s.score) AS avg_score
+     FROM lessons l
+     LEFT JOIN submissions s ON s.lesson_id = l.id AND s.user_id = $1
+     WHERE l.course_id = $2`,
+    [req.user.id, courseId]
+  );
+  
+  const totalLessons = parseInt(progressResult.rows[0].total_lessons);
+  const completedLessons = parseInt(progressResult.rows[0].completed_lessons);
+  const avgScore = parseFloat(progressResult.rows[0].avg_score) || 0;
+  const progress = (completedLessons / totalLessons) * 100;
+  
+  await pool.query(
+    `UPDATE enrollments 
+     SET progress = $1
+     WHERE user_id = $2 AND course_id = $3`,
+    [progress, req.user.id, courseId]
+  );
+  
+  res.json({ 
+    score, 
+    passed,
+    correctCount,
+    totalQuestions: questions.rows.length,
+    message: passed ? "Félicitations ! Vous avez validé cette leçon." : "Vous n'avez pas atteint le score requis. Réessayez !"
+  });
 }));
 
-// Progress
+// Progress (Student)
 app.get("/api/progress", auth(["student"]), asyncHandler(async (req, res) => {
   const progress = await pool.query(
     `SELECT c.id AS course_id, c.title AS course_title, 
@@ -633,21 +803,37 @@ app.get("/api/progress", auth(["student"]), asyncHandler(async (req, res) => {
      COUNT(DISTINCT l.id) AS lesson_count,
      COUNT(DISTINCT s.id) AS completed_lessons,
      COALESCE(ROUND(AVG(s.score), 2), 0) AS average_score,
-     COALESCE(ROUND(COUNT(DISTINCT s.id)::numeric / NULLIF(COUNT(DISTINCT l.id), 0) * 100, 2), 0) AS completion_percent
-     FROM enrollments en
-     JOIN courses c ON c.id = en.course_id
+     e.progress,
+     CASE WHEN e.progress = 100 THEN true ELSE false END AS completed
+     FROM enrollments e
+     JOIN courses c ON c.id = e.course_id
      JOIN modules m ON m.id = c.module_id
      LEFT JOIN lessons l ON l.course_id = c.id
-     LEFT JOIN submissions s ON s.lesson_id = l.id AND s.user_id = en.user_id
-     WHERE en.user_id = $1
-     GROUP BY c.id, m.id
-     ORDER BY en.created_at DESC`,
+     LEFT JOIN submissions s ON s.lesson_id = l.id AND s.user_id = e.user_id
+     WHERE e.user_id = $1
+     GROUP BY c.id, m.id, e.progress
+     ORDER BY e.created_at DESC`,
     [req.user.id]
   );
+  
+  for (const p of progress.rows) {
+    const moduleResult = await pool.query(
+      `SELECT 
+         COUNT(DISTINCT c2.id) AS total_courses,
+         SUM(CASE WHEN e2.progress = 100 THEN 1 ELSE 0 END) AS completed_courses
+       FROM courses c2
+       JOIN enrollments e2 ON e2.course_id = c2.id
+       WHERE c2.module_id = $1 AND e2.user_id = $2`,
+      [p.module_id, req.user.id]
+    );
+    
+    p.module_progress = (moduleResult.rows[0].completed_courses / moduleResult.rows[0].total_courses) * 100;
+  }
+  
   res.json(progress.rows);
 }));
 
-// Certificates
+// Certificates (Student & Promoter)
 app.post("/api/modules/:id/certificate", auth(["student"]), asyncHandler(async (req, res) => {
   const moduleId = req.params.id;
   
@@ -663,21 +849,39 @@ app.post("/api/modules/:id/certificate", auth(["student"]), asyncHandler(async (
   const module = moduleResult.rows[0];
   
   const stats = await pool.query(
-    `SELECT COUNT(DISTINCT l.id) AS lesson_count,
-     COUNT(DISTINCT s.lesson_id) AS completed_lessons,
-     COALESCE(ROUND(AVG(s.score), 2), 0) AS average_score
+    `SELECT 
+       COUNT(DISTINCT c.id) AS total_courses,
+       COUNT(DISTINCT CASE WHEN e.progress = 100 THEN c.id END) AS completed_courses,
+       COALESCE(ROUND(AVG(e.progress), 2), 0) AS avg_progress
      FROM courses c
-     JOIN lessons l ON l.course_id = c.id
-     LEFT JOIN submissions s ON s.lesson_id = l.id AND s.user_id = $1
+     LEFT JOIN enrollments e ON e.course_id = c.id AND e.user_id = $1
      WHERE c.module_id = $2`,
     [req.user.id, moduleId]
   );
   
   const result = stats.rows[0];
   
-  if (parseInt(result.completed_lessons) < parseInt(result.lesson_count) ||
-      parseFloat(result.average_score) < module.certificate_threshold) {
-    return res.status(400).json({ message: "Module non validé" });
+  if (parseInt(result.completed_courses) < parseInt(result.total_courses)) {
+    return res.status(400).json({ 
+      message: `Vous devez valider tous les cours du module (${result.completed_courses}/${result.total_courses} complétés)` 
+    });
+  }
+  
+  const avgScoreResult = await pool.query(
+    `SELECT AVG(s.score) AS avg_score
+     FROM submissions s
+     JOIN lessons l ON l.id = s.lesson_id
+     JOIN courses c ON c.id = l.course_id
+     WHERE s.user_id = $1 AND c.module_id = $2`,
+    [req.user.id, moduleId]
+  );
+  
+  const avgScore = parseFloat(avgScoreResult.rows[0].avg_score) || 0;
+  
+  if (avgScore < module.certificate_threshold) {
+    return res.status(400).json({ 
+      message: `Votre moyenne (${avgScore}%) est inférieure au seuil requis (${module.certificate_threshold}%)` 
+    });
   }
   
   const code = `BRAIN-${moduleId}-${req.user.id}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
@@ -687,11 +891,11 @@ app.post("/api/modules/:id/certificate", auth(["student"]), asyncHandler(async (
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (user_id, module_id) 
      DO UPDATE SET average_score = EXCLUDED.average_score`,
-    [req.user.id, moduleId, code, result.average_score]
+    [req.user.id, moduleId, code, avgScore]
   );
   
   const certificate = await pool.query(
-    `SELECT cert.*, m.title AS module_title, u.name AS student_name
+    `SELECT cert.*, m.title AS module_title, m.level, u.name AS student_name
      FROM certificates cert
      JOIN modules m ON m.id = cert.module_id
      JOIN users u ON u.id = cert.user_id
@@ -703,19 +907,48 @@ app.post("/api/modules/:id/certificate", auth(["student"]), asyncHandler(async (
 }));
 
 app.get("/api/certificates", auth(), asyncHandler(async (req, res) => {
-  const onlyMine = req.user.role === "student";
-  
-  const certificates = await pool.query(
-    `SELECT cert.*, m.title AS module_title, u.name AS student_name
+  const query_text = `
+    SELECT cert.*, m.title AS module_title, m.level, u.name AS student_name,
+     m.certificate_threshold
      FROM certificates cert
      JOIN modules m ON m.id = cert.module_id
      JOIN users u ON u.id = cert.user_id
-     WHERE ($1 = 0 OR cert.user_id = $2)
-     ORDER BY cert.issued_at DESC`,
-    [onlyMine ? 1 : 0, req.user.id]
-  );
+     ${req.user.role === "student" ? "WHERE cert.user_id = $1" : ""}
+     ORDER BY cert.issued_at DESC
+  `;
   
+  const params = req.user.role === "student" ? [req.user.id] : [];
+  const certificates = await pool.query(query_text, params);
   res.json(certificates.rows);
+}));
+
+// Statistics (Promoter)
+app.get("/api/statistics", auth(["promoter"]), asyncHandler(async (req, res) => {
+  const stats = await pool.query(`
+    SELECT 
+      (SELECT COUNT(*) FROM users WHERE role = 'student') AS total_students,
+      (SELECT COUNT(*) FROM users WHERE role = 'teacher') AS total_teachers,
+      (SELECT COUNT(*) FROM modules) AS total_modules,
+      (SELECT COUNT(*) FROM courses) AS total_courses,
+      (SELECT COUNT(*) FROM lessons) AS total_lessons,
+      (SELECT COUNT(*) FROM certificates) AS total_certificates,
+      (SELECT ROUND(AVG(progress), 2) FROM enrollments) AS avg_progress,
+      (SELECT COUNT(*) FROM submissions WHERE score >= 60) AS passed_evaluations
+  `);
+  
+  const topModules = await pool.query(`
+    SELECT m.title, COUNT(DISTINCT cert.id) AS certificates_issued
+    FROM modules m
+    LEFT JOIN certificates cert ON cert.module_id = m.id
+    GROUP BY m.id
+    ORDER BY certificates_issued DESC
+    LIMIT 5
+  `);
+  
+  res.json({
+    overview: stats.rows[0],
+    topModules: topModules.rows
+  });
 }));
 
 // Health check
@@ -757,39 +990,38 @@ app.use((err, req, res, next) => {
 async function start() {
   try {
     console.log("=".repeat(50));
-    console.log("🧠 BRAIN VISION LMS - Démarrage");
+    console.log("🧠 BRAIN VISION LMS v2.0");
     console.log("=".repeat(50));
     
-    // Créer les dossiers nécessaires
     await fs.mkdir(PUBLIC_DIR, { recursive: true });
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     console.log("✅ Dossiers créés");
     
-    // Connecter à PostgreSQL
     await pool.connect();
     console.log("✅ PostgreSQL connecté");
     
-    // Initialiser la base de données
     await initDatabase();
     
-    // Seed données de démo
     if (process.env.AUTO_SEED === "true" || !process.env.AUTO_SEED) {
       await seedDemo();
     }
     
-    // Démarrer le serveur
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}`);
       console.log("\n📝 Comptes de démonstration:");
       console.log("   👑 Promoteur: promoter@brain-vision.com / password123");
       console.log("   👨‍🏫 Enseignant: teacher@brain-vision.com / password123");
       console.log("   👨‍🎓 Étudiant: student@brain-vision.com / password123");
-      console.log("\n✨ Bonne utilisation de Brain Vision !\n");
+      console.log("\n✨ Fonctionnalités:");
+      console.log("   - Modules de cours par le promoteur");
+      console.log("   - Création de cours avec leçons (PDF/Vidéo)");
+      console.log("   - Évaluations par leçon avec questions");
+      console.log("   - Progression automatique en %");
+      console.log("   - Certificats de validation de module\n");
     });
     
   } catch (error) {
     console.error("❌ Erreur au démarrage:", error.message);
-    console.error(error.stack);
     process.exit(1);
   }
 }
