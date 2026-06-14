@@ -188,80 +188,115 @@ async function initDatabase() {
   ];
 
   for (const sql of tables) {
-    await pool.query(sql);
+    try {
+      await pool.query(sql);
+    } catch (error) {
+      console.error(`[DB] Erreur lors de la création d'une table:`, error.message);
+    }
   }
   
   console.log("[DB] ✓ Base de données initialisée");
 }
 
 async function seedDemo() {
-  const result = await pool.query("SELECT COUNT(*) FROM users");
-  if (parseInt(result.rows[0].count) > 0) {
-    console.log("[SEED] Données déjà existantes");
-    return;
-  }
+  try {
+    const result = await pool.query("SELECT COUNT(*) FROM users");
+    if (parseInt(result.rows[0].count) > 0) {
+      console.log("[SEED] Données déjà existantes");
+      return;
+    }
 
-  console.log("[SEED] Création des données de démonstration...");
-  
-  // Créer les utilisateurs
-  const users = await pool.query(
-    `INSERT INTO users (name, email, password_hash, role) VALUES
-      ($1, $2, $3, $4),
-      ($5, $6, $7, $8),
-      ($9, $10, $11, $12)
-     RETURNING id, role`,
-    [
-      "Admin Promoteur", "promoter@brain-vision.com", hashPassword("password123"), "promoter",
-      "Prof Enseignant", "teacher@brain-vision.com", hashPassword("password123"), "teacher",
-      "Étudiant Test", "student@brain-vision.com", hashPassword("password123"), "student"
-    ]
-  );
-  
-  const promoterId = users.rows.find(u => u.role === "promoter").id;
-  const teacherId = users.rows.find(u => u.role === "teacher").id;
-  
-  // Créer un module
-  const module = await pool.query(
-    `INSERT INTO modules (title, description, level, certificate_threshold, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    ["Intelligence Artificielle & Machine Learning", "Découvrez les fondamentaux de l'IA et du ML", "Débutant", 70, promoterId]
-  );
-  const moduleId = module.rows[0].id;
-  
-  // Créer un cours
-  const course = await pool.query(
-    `INSERT INTO courses (module_id, teacher_id, title, description)
-     VALUES ($1, $2, $3, $4) RETURNING id`,
-    [moduleId, teacherId, "Introduction au Machine Learning", "Apprenez les bases du ML avec des exemples pratiques"]
-  );
-  const courseId = course.rows[0].id;
-  
-  // Créer des leçons
-  const lessons = await pool.query(
-    `INSERT INTO lessons (course_id, title, summary, content_type, content_url, position) VALUES
-      ($1, 'Introduction à l\'IA', 'Histoire et concepts fondamentaux', 'pdf', 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', 1),
-      ($1, 'Les algorithmes de base', 'Découverte des algorithmes essentiels', 'video', 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4', 2)
-     RETURNING id, position`,
-    [courseId]
-  );
-  
-  // Créer des évaluations
-  for (const lesson of lessons.rows) {
-    const evaluation = await pool.query(
-      `INSERT INTO evaluations (lesson_id, title, pass_score) VALUES ($1, $2, $3) RETURNING id`,
-      [lesson.id, `Quiz - ${lesson.position === 1 ? "Introduction" : "Algorithmes"}`, 60]
-    );
-    const evaluationId = evaluation.rows[0].id;
+    console.log("[SEED] Création des données de démonstration...");
     
-    await pool.query(
-      `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
-        ($1, 'Qu\'est-ce que l\'intelligence artificielle ?', 'Un système qui imite l\'intelligence humaine', 'Un type de base de données', 'Un langage de programmation', 'Un navigateur web', 'A', 1),
-        ($1, 'Le Machine Learning est une sous-catégorie de...', 'La robotique', 'L\'intelligence artificielle', 'Le big data', 'Le cloud computing', 'B', 1)`,
-      [evaluationId]
+    // Créer les utilisateurs
+    const usersResult = await pool.query(
+      `INSERT INTO users (name, email, password_hash, role) VALUES
+        ($1, $2, $3, $4),
+        ($5, $6, $7, $8),
+        ($9, $10, $11, $12)
+       RETURNING id, role`,
+      [
+        "Admin Promoteur", "promoter@brain-vision.com", hashPassword("password123"), "promoter",
+        "Prof Enseignant", "teacher@brain-vision.com", hashPassword("password123"), "teacher",
+        "Etudiant Test", "student@brain-vision.com", hashPassword("password123"), "student"
+      ]
     );
+    
+    const promoterId = usersResult.rows.find(u => u.role === "promoter").id;
+    const teacherId = usersResult.rows.find(u => u.role === "teacher").id;
+    
+    // Créer un module
+    const moduleResult = await pool.query(
+      `INSERT INTO modules (title, description, level, certificate_threshold, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      ["Intelligence Artificielle", "Decouvrez les fondamentaux de l'IA", "Debutant", 70, promoterId]
+    );
+    const moduleId = moduleResult.rows[0].id;
+    
+    // Créer un cours
+    const courseResult = await pool.query(
+      `INSERT INTO courses (module_id, teacher_id, title, description)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [moduleId, teacherId, "Introduction au Machine Learning", "Apprenez les bases du ML"]
+    );
+    const courseId = courseResult.rows[0].id;
+    
+    // Créer des leçons
+    const lessonsResult = await pool.query(
+      `INSERT INTO lessons (course_id, title, summary, content_type, content_url, position) VALUES
+        ($1, $2, $3, $4, $5, 1),
+        ($1, $6, $7, $8, $9, 2)
+       RETURNING id, position`,
+      [
+        courseId,
+        "Introduction a l'IA", "Histoire et concepts fondamentaux", "pdf", 
+        "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+        "Les algorithmes de base", "Decouverte des algorithmes essentiels", "video",
+        "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"
+      ]
+    );
+    
+    // Créer des évaluations pour chaque leçon
+    for (const lesson of lessonsResult.rows) {
+      const evalTitle = lesson.position === 1 ? "Quiz Introduction" : "Quiz Algorithmes";
+      const evaluationResult = await pool.query(
+        `INSERT INTO evaluations (lesson_id, title, pass_score) 
+         VALUES ($1, $2, $3) 
+         RETURNING id`,
+        [lesson.id, evalTitle, 60]
+      );
+      const evaluationId = evaluationResult.rows[0].id;
+      
+      // Ajouter des questions
+      await pool.query(
+        `INSERT INTO questions (evaluation_id, question, option_a, option_b, option_c, option_d, correct_option, points) VALUES
+          ($1, $2, $3, $4, $5, $6, $7, 1),
+          ($1, $8, $9, $10, $11, $12, $13, 1)`,
+        [
+          evaluationId,
+          "Qu'est-ce que l'intelligence artificielle ?", 
+          "Un systeme qui imite l'intelligence humaine", 
+          "Un type de base de donnees", 
+          "Un langage de programmation", 
+          "Un navigateur web", 
+          "A",
+          "Le Machine Learning est une sous-categorie de...",
+          "La robotique",
+          "L'intelligence artificielle",
+          "Le big data",
+          "Le cloud computing",
+          "B"
+        ]
+      );
+    }
+    
+    console.log("[SEED] ✓ Données créées avec succès");
+  } catch (error) {
+    console.error("[SEED] Erreur lors du seeding:", error.message);
+    // Ne pas bloquer le démarrage si le seeding échoue
   }
-  
-  console.log("[SEED] ✓ Données créées avec succès");
 }
 
 // Routes API
@@ -363,7 +398,7 @@ app.post("/api/modules", auth(["promoter"]), asyncHandler(async (req, res) => {
   await pool.query(
     `INSERT INTO modules (title, description, level, certificate_threshold, created_by)
      VALUES ($1, $2, $3, $4, $5)`,
-    [title, description || "", level || "Débutant", Number(certificate_threshold) || 70, req.user.id]
+    [title, description || "", level || "Debutant", Number(certificate_threshold) || 70, req.user.id]
   );
   
   res.status(201).json({ message: "Module créé avec succès" });
@@ -728,6 +763,7 @@ async function start() {
     // Créer les dossiers nécessaires
     await fs.mkdir(PUBLIC_DIR, { recursive: true });
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
+    console.log("✅ Dossiers créés");
     
     // Connecter à PostgreSQL
     await pool.connect();
@@ -737,7 +773,7 @@ async function start() {
     await initDatabase();
     
     // Seed données de démo
-    if (process.env.AUTO_SEED === "true") {
+    if (process.env.AUTO_SEED === "true" || !process.env.AUTO_SEED) {
       await seedDemo();
     }
     
@@ -753,6 +789,7 @@ async function start() {
     
   } catch (error) {
     console.error("❌ Erreur au démarrage:", error.message);
+    console.error(error.stack);
     process.exit(1);
   }
 }
