@@ -1,483 +1,780 @@
+// ==================== STATE ====================
 const state = {
   token: localStorage.getItem('brain_token'),
   user: JSON.parse(localStorage.getItem('brain_user') || 'null'),
-  view: 'overview',
+  currentView: 'overview',
   modules: [],
   courses: [],
-  selectedCourse: null,
-  selectedLesson: null
+  currentCourse: null,
+  currentLesson: null,
+  statistics: null
 };
 
-const $ = (selector) => document.querySelector(selector);
-const root = $('#view-root');
-const roleNames = { promoter: '👑 Promoteur', teacher: '👨‍🏫 Enseignant', student: '👨‍🎓 Étudiant' };
+// ==================== DOM ELEMENTS ====================
+const app = document.getElementById('app');
 
-async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  if (!(options.body instanceof FormData)) {
-    headers['Content-Type'] = 'application/json';
-  }
-  if (state.token) {
-    headers.Authorization = `Bearer ${state.token}`;
-  }
-  
-  const response = await fetch(path, { ...options, headers });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  
-  if (!response.ok) {
-    throw new Error(data.message || 'Une erreur est survenue');
-  }
-  return data;
-}
-
-function toast(message, type = 'success') {
+// ==================== UTILITIES ====================
+function showToast(message, type = 'success') {
   const toast = document.createElement('div');
-  toast.className = 'toast';
+  toast.className = `toast toast-${type}`;
   toast.textContent = message;
-  toast.style.background = type === 'error' ? 'var(--rose)' : 'var(--teal)';
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 3000);
 }
 
-function saveSession(payload) {
-  state.token = payload.token;
-  state.user = payload.user;
-  localStorage.setItem('brain_token', payload.token);
-  localStorage.setItem('brain_user', JSON.stringify(payload.user));
+async function api(endpoint, options = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers
+  };
+  
+  if (state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+  
+  const config = {
+    ...options,
+    headers
+  };
+  
+  if (options.body && !(options.body instanceof FormData)) {
+    config.body = JSON.stringify(options.body);
+  }
+  
+  const response = await fetch(endpoint, config);
+  const data = await response.json();
+  
+  if (!response.ok) {
+    throw new Error(data.message || 'Une erreur est survenue');
+  }
+  
+  return data;
 }
 
-function logout() {
-  localStorage.removeItem('brain_token');
-  localStorage.removeItem('brain_user');
-  state.token = null;
-  state.user = null;
-  $('#auth-screen').classList.remove('hidden');
-  $('#app-screen').classList.add('hidden');
+function formatDate(dateString) {
+  return new Date(dateString).toLocaleDateString('fr-FR', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
+  });
 }
 
-function showApp() {
-  $('#auth-screen').classList.add('hidden');
-  $('#app-screen').classList.remove('hidden');
-  $('#user-name').textContent = state.user.name;
-  $('#user-email').textContent = state.user.email;
-  $('#role-label').textContent = roleNames[state.user.role];
-  $('#user-initials').textContent = state.user.name
+function getInitials(name) {
+  return name
     .split(' ')
-    .map(p => p[0])
+    .map(part => part[0])
     .join('')
     .slice(0, 2)
     .toUpperCase();
-  
-  // Masquer les onglets selon le rôle
-  document.querySelectorAll('.nav').forEach(btn => {
-    const restricted = {
-      studio: ['teacher', 'promoter'],
-      progress: ['student'],
-      certificates: ['student', 'promoter']
-    };
-    const allowed = restricted[btn.dataset.view];
-    if (allowed && !allowed.includes(state.user.role)) {
-      btn.style.display = 'none';
-    } else {
-      btn.style.display = '';
-    }
-  });
-  
-  navigate(state.view);
 }
 
-function setTitle(title) {
-  $('#page-title').textContent = title;
-  document.querySelectorAll('.nav').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.view === state.view);
-  });
-}
-
-function serialize(form) {
-  return Object.fromEntries(new FormData(form).entries());
-}
-
-async function loadBasics() {
+// ==================== AUTHENTIFICATION ====================
+async function handleLogin(email, password) {
   try {
-    const [modules, courses] = await Promise.all([
-      api('/api/modules'),
-      api('/api/courses')
-    ]);
-    state.modules = modules;
-    state.courses = courses;
+    const data = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email, password }
+    });
+    
+    state.token = data.token;
+    state.user = data.user;
+    localStorage.setItem('brain_token', data.token);
+    localStorage.setItem('brain_user', JSON.stringify(data.user));
+    
+    showToast('Connexion réussie !');
+    renderApp();
   } catch (error) {
-    console.error('Erreur chargement:', error);
+    showToast(error.message, 'error');
   }
 }
 
-async function navigate(view) {
-  state.view = view;
+async function handleRegister(name, email, password, role) {
+  try {
+    const data = await api('/api/auth/register', {
+      method: 'POST',
+      body: { name, email, password, role }
+    });
+    
+    state.token = data.token;
+    state.user = data.user;
+    localStorage.setItem('brain_token', data.token);
+    localStorage.setItem('brain_user', JSON.stringify(data.user));
+    
+    showToast('Inscription réussie !');
+    renderApp();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+function handleLogout() {
+  state.token = null;
+  state.user = null;
+  localStorage.removeItem('brain_token');
+  localStorage.removeItem('brain_user');
+  showToast('Déconnexion réussie');
+  renderApp();
+}
+
+// ==================== DATA FETCHING ====================
+async function loadDashboard() {
+  try {
+    return await api('/api/dashboard');
+  } catch (error) {
+    console.error('Erreur chargement dashboard:', error);
+    return { stats: { modules: 0, courses: 0, lessons: 0, certificates: 0 }, latest: [] };
+  }
+}
+
+async function loadModules() {
+  try {
+    const modules = await api('/api/modules');
+    state.modules = modules;
+    return modules;
+  } catch (error) {
+    console.error('Erreur chargement modules:', error);
+    return [];
+  }
+}
+
+async function loadCourses() {
+  try {
+    const courses = await api('/api/courses');
+    state.courses = courses;
+    return courses;
+  } catch (error) {
+    console.error('Erreur chargement cours:', error);
+    return [];
+  }
+}
+
+async function loadCourseDetail(courseId) {
+  try {
+    return await api(`/api/courses/${courseId}`);
+  } catch (error) {
+    showToast(error.message, 'error');
+    return null;
+  }
+}
+
+async function loadEvaluation(lessonId) {
+  try {
+    return await api(`/api/lessons/${lessonId}/evaluation`);
+  } catch (error) {
+    showToast(error.message, 'error');
+    return null;
+  }
+}
+
+async function submitEvaluation(lessonId, answers) {
+  try {
+    return await api(`/api/lessons/${lessonId}/submit`, {
+      method: 'POST',
+      body: { answers }
+    });
+  } catch (error) {
+    showToast(error.message, 'error');
+    return null;
+  }
+}
+
+async function loadProgress() {
+  try {
+    return await api('/api/progress');
+  } catch (error) {
+    console.error('Erreur chargement progression:', error);
+    return [];
+  }
+}
+
+async function loadCertificates() {
+  try {
+    return await api('/api/certificates');
+  } catch (error) {
+    console.error('Erreur chargement certificats:', error);
+    return [];
+  }
+}
+
+async function loadStatistics() {
+  try {
+    const stats = await api('/api/statistics');
+    state.statistics = stats;
+    return stats;
+  } catch (error) {
+    console.error('Erreur chargement statistiques:', error);
+    return null;
+  }
+}
+
+// ==================== ACTIONS ====================
+async function createModule(title, description, level, certificateThreshold) {
+  try {
+    await api('/api/modules', {
+      method: 'POST',
+      body: { title, description, level, certificate_threshold: certificateThreshold }
+    });
+    showToast('Module créé avec succès');
+    await loadModules();
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function createCourse(moduleId, title, description, coverFile) {
+  try {
+    const formData = new FormData();
+    formData.append('module_id', moduleId);
+    formData.append('title', title);
+    formData.append('description', description);
+    if (coverFile) formData.append('cover', coverFile);
+    
+    const response = await fetch('/api/courses', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${state.token}` },
+      body: formData
+    });
+    
+    if (!response.ok) throw new Error('Erreur création cours');
+    
+    showToast('Cours créé avec succès');
+    await loadCourses();
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function enrollCourse(courseId) {
+  try {
+    await api(`/api/courses/${courseId}/enroll`, { method: 'POST' });
+    showToast('Inscription confirmée');
+    await loadCourses();
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function createLesson(courseId, title, summary, contentType, position, file) {
+  try {
+    const formData = new FormData();
+    formData.append('title', title);
+    formData.append('summary', summary);
+    formData.append('content_type', contentType);
+    formData.append('position', position);
+    formData.append('content', file);
+    
+    const response = await fetch(`/api/courses/${courseId}/lessons`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${state.token}` },
+      body: formData
+    });
+    
+    if (!response.ok) throw new Error('Erreur création leçon');
+    
+    showToast('Leçon ajoutée avec succès');
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function saveEvaluation(lessonId, title, passScore, questions) {
+  try {
+    await api(`/api/lessons/${lessonId}/evaluation`, {
+      method: 'POST',
+      body: { title, pass_score: passScore, questions }
+    });
+    showToast('Évaluation enregistrée avec succès');
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function requestCertificate(moduleId) {
+  try {
+    await api(`/api/modules/${moduleId}/certificate`, { method: 'POST' });
+    showToast('Certificat généré avec succès !');
+    renderCurrentView();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+// ==================== RENDER FUNCTIONS ====================
+function renderAuthScreen() {
+  return `
+    <div class="auth-container">
+      <div class="auth-card">
+        <div class="auth-hero">
+          <div class="logo">
+            <div class="logo-icon">BV</div>
+            <span style="font-weight: 600;">Brain Vision</span>
+          </div>
+          <h1>Apprenez,<br>Évaluez,<br>Certifiez.</h1>
+          <p>Plateforme LMS nouvelle génération pour la formation professionnelle et académique.</p>
+          <div class="demo-buttons">
+            <button class="demo-btn" onclick="window.demoLogin('promoter@brain-vision.com')">👑 Promoteur</button>
+            <button class="demo-btn" onclick="window.demoLogin('teacher@brain-vision.com')">👨‍🏫 Enseignant</button>
+            <button class="demo-btn" onclick="window.demoLogin('student@brain-vision.com')">👨‍🎓 Étudiant</button>
+          </div>
+        </div>
+        <div class="auth-form">
+          <div class="tabs">
+            <button class="tab active" onclick="window.switchAuthTab('login')">Connexion</button>
+            <button class="tab" onclick="window.switchAuthTab('register')">Inscription</button>
+          </div>
+          <div id="login-form">
+            <div class="form-group">
+              <label>Email</label>
+              <input type="email" id="login-email" placeholder="exemple@email.com">
+            </div>
+            <div class="form-group">
+              <label>Mot de passe</label>
+              <input type="password" id="login-password" placeholder="••••••••">
+            </div>
+            <button class="btn btn-primary" onclick="window.submitLogin()">Se connecter</button>
+          </div>
+          <div id="register-form" style="display: none;">
+            <div class="form-group">
+              <label>Nom complet</label>
+              <input type="text" id="register-name" placeholder="Jean Dupont">
+            </div>
+            <div class="form-group">
+              <label>Email</label>
+              <input type="email" id="register-email" placeholder="exemple@email.com">
+            </div>
+            <div class="form-group">
+              <label>Mot de passe</label>
+              <input type="password" id="register-password" placeholder="6 caractères minimum">
+            </div>
+            <div class="form-group">
+              <label>Rôle</label>
+              <select id="register-role">
+                <option value="student">👨‍🎓 Étudiant</option>
+                <option value="teacher">👨‍🏫 Enseignant</option>
+                <option value="promoter">👑 Promoteur</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" onclick="window.submitRegister()">Créer mon compte</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAppLayout(content) {
+  const roleIcons = {
+    promoter: '👑',
+    teacher: '👨‍🏫',
+    student: '👨‍🎓'
+  };
+  
+  const roleNames = {
+    promoter: 'Promoteur',
+    teacher: 'Enseignant',
+    student: 'Étudiant'
+  };
+  
+  const navItems = [
+    { id: 'overview', label: 'Tableau de bord', icon: '📊', roles: ['promoter', 'teacher', 'student'] },
+    { id: 'modules', label: 'Modules', icon: '📚', roles: ['promoter', 'teacher', 'student'] },
+    { id: 'courses', label: 'Cours', icon: '🎓', roles: ['promoter', 'teacher', 'student'] },
+    { id: 'studio', label: 'Studio', icon: '✏️', roles: ['teacher', 'promoter'] },
+    { id: 'progress', label: 'Progression', icon: '📈', roles: ['student'] },
+    { id: 'certificates', label: 'Certificats', icon: '🏆', roles: ['student', 'promoter'] },
+    { id: 'statistics', label: 'Statistiques', icon: '📊', roles: ['promoter'] }
+  ];
+  
+  const visibleNav = navItems.filter(item => item.roles.includes(state.user.role));
+  
+  return `
+    <div class="app-container">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo">
+            <div class="logo-icon">BV</div>
+            <span>Brain Vision</span>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          ${visibleNav.map(item => `
+            <div class="nav-item ${state.currentView === item.id ? 'active' : ''}" onclick="window.navigateTo('${item.id}')">
+              <span>${item.icon}</span>
+              <span>${item.label}</span>
+            </div>
+          `).join('')}
+        </nav>
+        <div class="sidebar-footer">
+          <button class="btn btn-outline" style="width: 100%;" onclick="window.handleLogout()">
+            🚪 Déconnexion
+          </button>
+        </div>
+      </aside>
+      <main class="main-content">
+        <div class="top-bar">
+          <div>
+            <div class="badge badge-info">${roleIcons[state.user.role]} ${roleNames[state.user.role]}</div>
+            <h2 style="margin-top: 0.5rem;">${getPageTitle()}</h2>
+          </div>
+          <div class="user-info">
+            <div class="user-avatar">${getInitials(state.user.name)}</div>
+            <div>
+              <div><strong>${state.user.name}</strong></div>
+              <div style="font-size: 0.875rem; color: var(--gray);">${state.user.email}</div>
+            </div>
+          </div>
+        </div>
+        ${content}
+      </main>
+    </div>
+  `;
+}
+
+function getPageTitle() {
   const titles = {
     overview: 'Tableau de bord',
-    modules: 'Modules',
-    courses: 'Cours',
+    modules: 'Gestion des modules',
+    courses: 'Catalogue des cours',
     studio: 'Studio créateur',
     progress: 'Ma progression',
-    certificates: 'Mes certificats'
+    certificates: 'Mes certificats',
+    statistics: 'Statistiques globales'
   };
-  setTitle(titles[view]);
-  
-  try {
-    if (['modules', 'courses', 'studio', 'overview'].includes(view)) {
-      await loadBasics();
-    }
-    
-    if (view === 'overview') await renderOverview();
-    else if (view === 'modules') await renderModules();
-    else if (view === 'courses') await renderCourses();
-    else if (view === 'studio') await renderStudio();
-    else if (view === 'progress') await renderProgress();
-    else if (view === 'certificates') await renderCertificates();
-  } catch (error) {
-    root.innerHTML = `<div class="panel"><h3>Erreur</h3><p>${error.message}</p></div>`;
-  }
+  return titles[state.currentView] || 'Brain Vision';
 }
 
 async function renderOverview() {
-  const data = await api('/api/dashboard');
-  root.innerHTML = `
+  const dashboard = await loadDashboard();
+  
+  return `
     <div class="stats-grid">
-      <div class="stat"><span class="eyebrow">Modules</span><strong>${data.stats.modules}</strong></div>
-      <div class="stat"><span class="eyebrow">Cours</span><strong>${data.stats.courses}</strong></div>
-      <div class="stat"><span class="eyebrow">Leçons</span><strong>${data.stats.lessons}</strong></div>
-      <div class="stat"><span class="eyebrow">Certificats</span><strong>${data.stats.certificates}</strong></div>
+      <div class="stat-card">
+        <div class="stat-title">Modules</div>
+        <div class="stat-value">${dashboard.stats.modules}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Cours</div>
+        <div class="stat-value">${dashboard.stats.courses}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Leçons</div>
+        <div class="stat-value">${dashboard.stats.lessons}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Certificats</div>
+        <div class="stat-value">${dashboard.stats.certificates}</div>
+      </div>
     </div>
-    <div class="panel">
-      <h3>📖 Derniers cours</h3>
-      <div class="card-grid">
-        ${data.latest.map(c => `
-          <div class="card">
-            <p class="eyebrow">${c.module_title}</p>
-            <h3>${c.title}</h3>
-            <p>${c.description || 'Aucune description'}</p>
-            <div class="meta-row">
-              <span class="pill">👨‍🏫 ${c.teacher_name || 'Enseignant'}</span>
+    
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">📖 Derniers cours</h3>
+      </div>
+      <div class="card-body">
+        <div class="cards-grid">
+          ${dashboard.latest.map(course => `
+            <div class="card">
+              <div class="card-header">
+                <div class="badge badge-info">${course.module_title}</div>
+                <h4 class="card-title">${course.title}</h4>
+              </div>
+              <div class="card-body">
+                <p style="color: var(--gray); font-size: 0.875rem;">${course.description || 'Aucune description'}</p>
+                ${course.progress !== undefined ? `
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${course.progress}%"></div>
+                  </div>
+                  <div style="font-size: 0.875rem;">Progression: ${Math.round(course.progress)}%</div>
+                ` : ''}
+              </div>
+              <div class="card-footer">
+                <button class="btn btn-primary" onclick="window.viewCourse(${course.id})">Voir le cours</button>
+              </div>
             </div>
-            <button class="quiet" data-open-course="${c.id}">Voir le cours</button>
-          </div>
-        `).join('') || '<p>Aucun cours disponible</p>'}
+          `).join('')}
+        </div>
       </div>
     </div>
   `;
 }
 
 async function renderModules() {
-  const promoterForm = state.user.role === 'promoter' ? `
-    <div class="panel">
-      <h3>➕ Créer un module</h3>
-      <form id="module-form" class="form-grid">
-        <label>Titre <input name="title" required></label>
-        <label>Niveau <input name="level" value="Débutant"></label>
-        <label>Seuil certificat (%) <input name="certificate_threshold" type="number" value="70"></label>
-        <label class="full">Description <textarea name="description"></textarea></label>
-        <button class="primary" type="submit">Créer</button>
-      </form>
-    </div>
-  ` : '';
+  const modules = await loadModules();
+  const isPromoter = state.user.role === 'promoter';
   
-  root.innerHTML = `
-    ${promoterForm}
-    <div class="card-grid">
-      ${state.modules.map(m => `
-        <div class="card">
-          <p class="eyebrow">${m.level}</p>
-          <h3>${m.title}</h3>
-          <p>${m.description || 'Module prêt à l\'emploi'}</p>
-          <div class="meta-row">
-            <span class="pill">📚 ${m.course_count || 0} cours</span>
-            <span class="pill">🎯 Seuil ${m.certificate_threshold}%</span>
+  return `
+    ${isPromoter ? `
+      <div class="card" style="margin-bottom: 2rem;">
+        <div class="card-header">
+          <h3 class="card-title">➕ Créer un module</h3>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Titre du module</label>
+            <input type="text" id="module-title" placeholder="Ex: Développement Web">
           </div>
-          ${state.user.role === 'student' ? `<button class="primary" data-certificate-module="${m.id}">Obtenir certificat</button>` : ''}
+          <div class="form-group">
+            <label>Description</label>
+            <textarea id="module-description" rows="3" placeholder="Description du module..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Niveau</label>
+            <select id="module-level">
+              <option value="Débutant">Débutant</option>
+              <option value="Intermédiaire">Intermédiaire</option>
+              <option value="Avancé">Avancé</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Seuil de validation (%)</label>
+            <input type="number" id="module-threshold" value="70" min="1" max="100">
+          </div>
+          <button class="btn btn-primary" onclick="window.createModuleFromForm()">Créer le module</button>
+        </div>
+      </div>
+    ` : ''}
+    
+    <div class="cards-grid">
+      ${modules.map(module => `
+        <div class="card">
+          <div class="card-header">
+            <div class="badge ${module.level === 'Débutant' ? 'badge-success' : module.level === 'Intermédiaire' ? 'badge-warning' : 'badge-info'}">
+              ${module.level || 'Débutant'}
+            </div>
+            <h3 class="card-title">${module.title}</h3>
+          </div>
+          <div class="card-body">
+            <p style="color: var(--gray); margin-bottom: 1rem;">${module.description || 'Aucune description'}</p>
+            <div style="display: flex; gap: 1rem; font-size: 0.875rem;">
+              <span>📚 ${module.course_count || 0} cours</span>
+              <span>🎯 Seuil: ${module.certificate_threshold}%</span>
+              <span>🏆 ${module.certificate_count || 0} certificats</span>
+            </div>
+          </div>
+          ${state.user.role === 'student' ? `
+            <div class="card-footer">
+              <button class="btn btn-primary" onclick="window.requestCertificate(${module.id})">Obtenir certificat</button>
+            </div>
+          ` : ''}
         </div>
       `).join('')}
     </div>
   `;
-  
-  $('#module-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    await api('/api/modules', { method: 'POST', body: JSON.stringify(serialize(e.target)) });
-    toast('Module créé avec succès');
-    navigate('modules');
-  });
 }
 
 async function renderCourses() {
-  root.innerHTML = `
-    <div class="card-grid">
-      ${state.courses.map(c => `
+  const courses = await loadCourses();
+  
+  return `
+    <div class="cards-grid">
+      ${courses.map(course => `
         <div class="card">
-          <p class="eyebrow">${c.module_title}</p>
-          <h3>${c.title}</h3>
-          <p>${c.description || 'Cours sans description'}</p>
-          <div class="meta-row">
-            <span class="pill">📖 ${c.lesson_count || 0} leçons</span>
-            <span class="pill">👨‍🏫 ${c.teacher_name || 'Enseignant'}</span>
+          <div class="card-header">
+            <div class="badge badge-info">${course.module_title}</div>
+            <h3 class="card-title">${course.title}</h3>
           </div>
-          <button class="quiet" data-open-course="${c.id}">Voir</button>
-          ${state.user.role === 'student' ? `<button class="primary" data-enroll="${c.id}">${c.enrolled ? '✅ Inscrit' : 'S\'inscrire'}</button>` : ''}
+          <div class="card-body">
+            <p style="color: var(--gray); margin-bottom: 1rem;">${course.description || 'Aucune description'}</p>
+            <div style="display: flex; gap: 1rem; font-size: 0.875rem; margin-bottom: 1rem;">
+              <span>📖 ${course.lesson_count || 0} leçons</span>
+              <span>👨‍🏫 ${course.teacher_name || 'Enseignant'}</span>
+              ${course.enrolled ? `<span class="badge badge-success">✅ Inscrit</span>` : ''}
+            </div>
+            ${course.my_progress !== undefined && course.my_progress > 0 ? `
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: ${course.my_progress}%"></div>
+              </div>
+              <div style="font-size: 0.875rem;">Progression: ${Math.round(course.my_progress)}%</div>
+            ` : ''}
+          </div>
+          <div class="card-footer">
+            <button class="btn btn-primary" onclick="window.viewCourse(${course.id})">Voir le cours</button>
+            ${state.user.role === 'student' && !course.enrolled ? `
+              <button class="btn btn-secondary" onclick="window.enrollCourse(${course.id})">S'inscrire</button>
+            ` : ''}
+          </div>
         </div>
       `).join('')}
     </div>
   `;
 }
 
-function renderStudio() {
+async function renderStudio() {
   if (state.user.role === 'promoter') {
-    root.innerHTML = `
-      <div class="panel">
-        <h3>👑 Console promoteur</h3>
-        <p>Créez des modules dans l'onglet Modules, puis laissez les enseignants créer leurs cours.</p>
-      </div>
-      <div class="card-grid">
-        ${state.modules.map(m => `
-          <div class="card">
-            <h3>${m.title}</h3>
-            <p>${m.description || ''}</p>
-            <span class="pill">Seuil: ${m.certificate_threshold}%</span>
-          </div>
-        `).join('')}
+    return `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">👑 Console promoteur</h3>
+        </div>
+        <div class="card-body">
+          <p>En tant que promoteur, vous pouvez :</p>
+          <ul style="margin-top: 1rem; margin-left: 1.5rem;">
+            <li>Créer des modules dans l'onglet "Modules"</li>
+            <li>Les enseignants créeront leurs cours dans ces modules</li>
+            <li>Consulter les statistiques globales</li>
+            <li>Générer des certificats pour les étudiants</li>
+          </ul>
+        </div>
       </div>
     `;
-    return;
   }
   
-  root.innerHTML = `
-    <div class="split">
-      <div>
-        <div class="panel">
-          <h3>➕ Créer un cours</h3>
-          <form id="course-form" class="form-stack">
-            <label>Module
-              <select name="module_id">${state.modules.map(m => `<option value="${m.id}">${m.title}</option>`).join('')}
-              </select>
-            </label>
-            <label>Titre <input name="title" required></label>
-            <label>Description <textarea name="description"></textarea></label>
-            <button class="primary" type="submit">Créer</button>
-          </form>
-        </div>
-        <div class="panel">
-          <h3>➕ Ajouter une leçon</h3>
-          <form id="lesson-form" class="form-stack">
-            <label>Cours
-              <select name="course_id">${state.courses.map(c => `<option value="${c.id}">${c.title}</option>`).join('')}
-              </select>
-            </label>
-            <label>Titre <input name="title" required></label>
-            <label>Résumé <textarea name="summary"></textarea></label>
-            <div class="form-grid">
-              <label>Type
-                <select name="content_type">
-                  <option value="pdf">PDF</option>
-                  <option value="video">Vidéo</option>
-                </select>
-              </label>
-              <label>Position <input name="position" type="number" value="1"></label>
-            </div>
-            <label>Fichier <input name="content" type="file" accept=".pdf,video/*" required></label>
-            <button class="primary" type="submit">Ajouter</button>
-          </form>
-        </div>
-      </div>
-      <div class="panel">
-        <h3>📝 Créer évaluation</h3>
-        <form id="evaluation-form" class="form-stack">
-          <label>Cours
-            <select name="course_id" id="eval-course">${state.courses.map(c => `<option value="${c.id}">${c.title}</option>`).join('')}
-            </select>
-          </label>
-          <label>Leçon <select name="lesson_id" id="eval-lesson"></select></label>
-          <label>Titre <input name="title" value="Quiz" required></label>
-          <label>Score requis (%) <input name="pass_score" type="number" value="60"></label>
-          <div id="question-list"></div>
-          <button type="button" class="ghost" id="add-question">➕ Ajouter question</button>
-          <button class="primary" type="submit">Enregistrer</button>
-        </form>
-      </div>
-    </div>
-  `;
-  
-  bindStudioForms();
-}
-
-function addQuestion() {
-  const template = $('#question-template').content.cloneNode(true);
-  $('#question-list').appendChild(template);
-}
-
-async function refreshLessonSelect() {
-  const courseId = $('#eval-course')?.value;
-  if (!courseId) return;
-  const data = await api(`/api/courses/${courseId}`);
-  $('#eval-lesson').innerHTML = data.lessons.map(l => `<option value="${l.id}">${l.title}</option>`).join('');
-}
-
-function bindStudioForms() {
-  $('#course-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    await api('/api/courses', { method: 'POST', body: new FormData(e.target) });
-    toast('Cours créé');
-    navigate('studio');
-  });
-  
-  $('#lesson-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const courseId = formData.get('course_id');
-    await api(`/api/courses/${courseId}/lessons`, { method: 'POST', body: formData });
-    toast('Leçon ajoutée');
-    navigate('studio');
-  });
-  
-  $('#add-question')?.addEventListener('click', addQuestion);
-  $('#eval-course')?.addEventListener('change', refreshLessonSelect);
-  addQuestion();
-  refreshLessonSelect();
-  
-  $('#evaluation-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const questions = [...document.querySelectorAll('.question-box')].map(box => ({
-      question: box.querySelector('[name="question"]').value,
-      option_a: box.querySelector('[name="option_a"]').value,
-      option_b: box.querySelector('[name="option_b"]').value,
-      option_c: box.querySelector('[name="option_c"]').value,
-      option_d: box.querySelector('[name="option_d"]').value,
-      correct_option: box.querySelector('[name="correct_option"]').value
-    }));
-    
-    await api(`/api/lessons/${formData.get('lesson_id')}/evaluation`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title: formData.get('title'),
-        pass_score: formData.get('pass_score'),
-        questions
-      })
-    });
-    toast('Évaluation enregistrée');
-  });
-}
-
-async function openCourse(courseId) {
-  const data = await api(`/api/courses/${courseId}`);
-  state.selectedCourse = data.course;
-  state.selectedLesson = data.lessons[0] || null;
-  renderCourseDetail(data);
-}
-
-function renderCourseDetail(data) {
-  const { course, lessons } = data;
-  const active = state.selectedLesson || lessons[0];
-  
-  root.innerHTML = `
-    <div class="panel">
-      <p class="eyebrow">${course.module_title}</p>
-      <h3>${course.title}</h3>
-      <p>${course.description || ''}</p>
-    </div>
-    <div class="split">
-      <div class="lesson-list">
-        ${lessons.map(lesson => `
-          <div class="lesson">
-            <div class="lesson-number">${lesson.position}</div>
-            <div>
-              <strong>${lesson.title}</strong>
-              <p>${lesson.summary || lesson.content_type}</p>
-              ${lesson.student_score ? `<span class="pill">Score: ${lesson.student_score}%</span>` : ''}
-            </div>
-            <button class="quiet" data-select-lesson="${lesson.id}">Voir</button>
-          </div>
-        `).join('')}
-      </div>
-      <div id="lesson-pane">${active ? lessonPane(active) : ''}</div>
-    </div>
-  `;
-  
-  document.querySelectorAll('[data-select-lesson]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.selectedLesson = lessons.find(l => l.id === parseInt(btn.dataset.selectLesson));
-      $('#lesson-pane').innerHTML = lessonPane(state.selectedLesson);
-      bindEvaluationButton();
-    });
-  });
-  bindEvaluationButton();
-}
-
-function lessonPane(lesson) {
-  const media = lesson.content_type === 'video'
-    ? `<video src="${lesson.content_url}" controls></video>`
-    : `<iframe src="${lesson.content_url}"></iframe>`;
+  const modules = await loadModules();
+  const courses = await loadCourses();
   
   return `
-    <div class="panel">
-      <h3>${lesson.title}</h3>
-      <div class="viewer">${media}</div>
-      ${state.user.role === 'student' && lesson.evaluation_id ? 
-        `<button class="primary" data-start-evaluation="${lesson.id}" style="margin-top: 16px;">📝 Passer l'évaluation</button>` : 
-        '<p class="muted">Aucune évaluation disponible</p>'}
+    <div style="display: grid; gap: 2rem;">
+      <!-- Création de cours -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">🎓 Créer un cours</h3>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Module</label>
+            <select id="course-module">
+              ${modules.map(m => `<option value="${m.id}">${m.title}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Titre du cours</label>
+            <input type="text" id="course-title" placeholder="Ex: Introduction à React">
+          </div>
+          <div class="form-group">
+            <label>Description</label>
+            <textarea id="course-description" rows="3" placeholder="Description du cours..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Image de couverture</label>
+            <input type="file" id="course-cover" accept="image/*">
+          </div>
+          <button class="btn btn-primary" onclick="window.createCourseFromForm()">Créer le cours</button>
+        </div>
+      </div>
+      
+      <!-- Création de leçon -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">📖 Ajouter une leçon</h3>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Cours</label>
+            <select id="lesson-course">
+              <option value="">Sélectionner un cours</option>
+              ${courses.map(c => `<option value="${c.id}">${c.title}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Titre de la leçon</label>
+            <input type="text" id="lesson-title" placeholder="Ex: Les bases de React">
+          </div>
+          <div class="form-group">
+            <label>Résumé</label>
+            <textarea id="lesson-summary" rows="2" placeholder="Résumé de la leçon..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Type de contenu</label>
+            <select id="lesson-type">
+              <option value="pdf">PDF</option>
+              <option value="video">Vidéo</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Position dans le cours</label>
+            <input type="number" id="lesson-position" value="1" min="1">
+          </div>
+          <div class="form-group">
+            <label>Fichier (PDF ou Vidéo)</label>
+            <input type="file" id="lesson-file" accept=".pdf,video/*">
+          </div>
+          <button class="btn btn-primary" onclick="window.createLessonFromForm()">Ajouter la leçon</button>
+        </div>
+      </div>
+      
+      <!-- Création d'évaluation -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">📝 Créer une évaluation</h3>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Cours</label>
+            <select id="eval-course" onchange="window.loadLessonsForEval()">
+              <option value="">Sélectionner un cours</option>
+              ${courses.map(c => `<option value="${c.id}">${c.title}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Leçon</label>
+            <select id="eval-lesson">
+              <option value="">Sélectionner d'abord un cours</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Titre de l'évaluation</label>
+            <input type="text" id="eval-title" placeholder="Ex: Quiz sur React">
+          </div>
+          <div class="form-group">
+            <label>Score requis (%)</label>
+            <input type="number" id="eval-pass-score" value="60" min="1" max="100">
+          </div>
+          <div id="questions-container"></div>
+          <button class="btn btn-secondary" onclick="window.addQuestion()">➕ Ajouter une question</button>
+          <button class="btn btn-primary" onclick="window.saveEvaluationFromForm()" style="margin-top: 1rem;">Enregistrer l'évaluation</button>
+        </div>
+      </div>
     </div>
   `;
-}
-
-function bindEvaluationButton() {
-  $('[data-start-evaluation]')?.addEventListener('click', async (e) => {
-    const lessonId = e.target.dataset.startEvaluation;
-    const data = await api(`/api/lessons/${lessonId}/evaluation`);
-    
-    $('#lesson-pane').innerHTML += `
-      <div class="panel" id="quiz-panel">
-        <h3>${data.evaluation.title}</h3>
-        <form id="quiz-form">
-          ${data.questions.map(q => `
-            <fieldset class="question-box">
-              <legend><strong>${q.question}</strong></legend>
-              <div class="choice-list">
-                ${['a', 'b', 'c', 'd'].map(opt => `
-                  <label>
-                    <input type="radio" name="${q.id}" value="${opt.toUpperCase()}" required>
-                    ${opt.toUpperCase()}. ${q[`option_${opt}`]}
-                  </label>
-                `).join('')}
-              </div>
-            </fieldset>
-          `).join('')}
-          <button class="primary" type="submit">Soumettre</button>
-        </form>
-      </div>
-    `;
-    
-    $('#quiz-form').addEventListener('submit', async (submitEvent) => {
-      submitEvent.preventDefault();
-      const answers = Object.fromEntries(new FormData(submitEvent.target).entries());
-      const result = await api(`/api/lessons/${lessonId}/submit`, {
-        method: 'POST',
-        body: JSON.stringify({ answers })
-      });
-      toast(`Score: ${result.score}% - ${result.passed ? '✅ Validé' : '❌ Non validé'}`);
-      openCourse(state.selectedCourse.id);
-    });
-  });
 }
 
 async function renderProgress() {
-  const progress = await api('/api/progress');
-  root.innerHTML = `
-    <div class="card-grid">
-      ${progress.map(p => `
+  const progress = await loadProgress();
+  
+  if (progress.length === 0) {
+    return `
+      <div class="card">
+        <div class="card-body" style="text-align: center; padding: 3rem;">
+          <p>Vous n'êtes inscrit à aucun cours pour le moment.</p>
+          <button class="btn btn-primary" onclick="window.navigateTo('courses')" style="margin-top: 1rem;">Parcourir les cours</button>
+        </div>
+      </div>
+    `;
+  }
+  
+  return `
+    <div class="cards-grid">
+      ${progress.map(item => `
         <div class="card">
-          <p class="eyebrow">${p.module_title}</p>
-          <h3>${p.course_title}</h3>
-          <p>${p.completed_lessons}/${p.lesson_count} leçons complétées</p>
-          <div class="progress-bar"><span style="width: ${p.completion_percent}%"></span></div>
-          <div class="meta-row">
-            <span class="pill">📊 ${p.average_score}% de moyenne</span>
-            <span class="pill">${p.completion_percent}% complété</span>
+          <div class="card-header">
+            <div class="badge badge-info">${item.module_title}</div>
+            <h3 class="card-title">${item.course_title}</h3>
+          </div>
+          <div class="card-body">
+            <div style="margin-bottom: 1rem;">
+              <div>Leçons complétées: ${item.completed_lessons}/${item.lesson_count}</div>
+              <div>Moyenne: ${item.average_score}%</div>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: ${item.progress}%"></div>
+            </div>
+            <div style="margin-top: 0.5rem; font-size: 0.875rem;">Progression globale: ${Math.round(item.progress)}%</div>
+            ${item.module_progress ? `
+              <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--light);">
+                <div>Progression du module: ${Math.round(item.module_progress)}%</div>
+                <div class="progress-bar" style="margin-top: 0.5rem;">
+                  <div class="progress-fill" style="width: ${item.module_progress}%"></div>
+                </div>
+              </div>
+            ` : ''}
+          </div>
+          <div class="card-footer">
+            <button class="btn btn-primary" onclick="window.viewCourse(${item.course_id})">Continuer</button>
           </div>
         </div>
       `).join('')}
@@ -486,18 +783,39 @@ async function renderProgress() {
 }
 
 async function renderCertificates() {
-  const certificates = await api('/api/certificates');
-  root.innerHTML = `
-    <div class="card-grid">
+  const certificates = await loadCertificates();
+  
+  if (certificates.length === 0) {
+    return `
+      <div class="card">
+        <div class="card-body" style="text-align: center; padding: 3rem;">
+          <p>Aucun certificat obtenu pour le moment.</p>
+          <p style="font-size: 0.875rem; margin-top: 0.5rem;">Complétez un module avec un score suffisant pour obtenir un certificat.</p>
+        </div>
+      </div>
+    `;
+  }
+  
+  return `
+    <div class="cards-grid">
       ${certificates.map(cert => `
         <div class="card">
-          <p class="eyebrow">🏆 Certificat</p>
-          <h3>${cert.module_title}</h3>
-          <p>Délivré à ${cert.student_name}</p>
-          <p><strong>Score: ${cert.average_score}%</strong></p>
-          <div class="meta-row">
-            <span class="pill">📜 ${cert.certificate_code}</span>
-            <span class="pill">📅 ${new Date(cert.issued_at).toLocaleDateString('fr-FR')}</span>
+          <div class="card-header">
+            <div class="badge badge-success">🏆 Certificat officiel</div>
+            <h3 class="card-title">${cert.module_title}</h3>
+          </div>
+          <div class="card-body">
+            <p><strong>${cert.student_name}</strong></p>
+            <p>Niveau: ${cert.level || 'Débutant'}</p>
+            <p>Score obtenu: ${cert.average_score}%</p>
+            <p>Seuil requis: ${cert.certificate_threshold}%</p>
+            <div style="margin-top: 1rem; padding: 1rem; background: var(--light); border-radius: var(--radius);">
+              <code>${cert.certificate_code}</code>
+            </div>
+            <p style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--gray);">Délivré le ${formatDate(cert.issued_at)}</p>
+          </div>
+          <div class="card-footer">
+            <button class="btn btn-outline" onclick="window.print()">🖨️ Imprimer</button>
           </div>
         </div>
       `).join('')}
@@ -505,82 +823,453 @@ async function renderCertificates() {
   `;
 }
 
-// Event Listeners
-document.addEventListener('click', async (e) => {
-  const courseBtn = e.target.closest('[data-open-course]');
-  const enrollBtn = e.target.closest('[data-enroll]');
-  const certBtn = e.target.closest('[data-certificate-module]');
+async function renderStatistics() {
+  const stats = await loadStatistics();
   
-  try {
-    if (courseBtn) await openCourse(courseBtn.dataset.openCourse);
-    if (enrollBtn) {
-      await api(`/api/courses/${enrollBtn.dataset.enroll}/enroll`, { method: 'POST' });
-      toast('Inscription confirmée');
-      navigate('courses');
+  if (!stats) return '<div class="card"><div class="card-body">Chargement...</div></div>';
+  
+  return `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-title">Étudiants</div>
+        <div class="stat-value">${stats.overview.total_students}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Enseignants</div>
+        <div class="stat-value">${stats.overview.total_teachers}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Modules</div>
+        <div class="stat-value">${stats.overview.total_modules}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Cours</div>
+        <div class="stat-value">${stats.overview.total_courses}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Leçons</div>
+        <div class="stat-value">${stats.overview.total_lessons}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Certificats</div>
+        <div class="stat-value">${stats.overview.total_certificates}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Progression moyenne</div>
+        <div class="stat-value">${stats.overview.avg_progress || 0}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">Évaluations réussies</div>
+        <div class="stat-value">${stats.overview.passed_evaluations}</div>
+      </div>
+    </div>
+    
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">🏆 Top modules - Certificats délivrés</h3>
+      </div>
+      <div class="card-body">
+        ${stats.topModules.map(module => `
+          <div style="margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+              <span>${module.title}</span>
+              <span>${module.certificates_issued || 0} certificats</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: ${Math.min(100, (module.certificates_issued || 0) * 10)}%"></div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+async function renderCourseDetail(courseId) {
+  const data = await loadCourseDetail(courseId);
+  if (!data) return '<div class="card"><div class="card-body">Cours introuvable</div></div>';
+  
+  state.currentCourse = data.course;
+  
+  return `
+    <div class="card" style="margin-bottom: 2rem;">
+      <div class="card-header">
+        <div class="badge badge-info">${data.course.module_title}</div>
+        <h2 class="card-title">${data.course.title}</h2>
+        <p style="color: var(--gray);">${data.course.description || 'Aucune description'}</p>
+        ${data.course.my_progress !== undefined && data.course.my_progress > 0 ? `
+          <div style="margin-top: 1rem;">
+            <div>Progression: ${Math.round(data.course.my_progress)}%</div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: ${data.course.my_progress}%"></div>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: 320px 1fr; gap: 2rem;">
+      <div class="lesson-list">
+        ${data.lessons.map((lesson, index) => `
+          <div class="lesson-item" onclick="window.viewLesson(${courseId}, ${lesson.id})">
+            <div class="lesson-number">${index + 1}</div>
+            <div class="lesson-content">
+              <div class="lesson-title">${lesson.title}</div>
+              <div class="lesson-meta">
+                ${lesson.content_type === 'pdf' ? '📄 PDF' : '🎥 Vidéo'}
+                ${lesson.is_validated ? ' ✅ Validé' : lesson.student_score ? ` 📊 ${lesson.student_score}%` : ''}
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div id="lesson-viewer">
+        ${state.currentLesson ? await renderLessonViewer(courseId, state.currentLesson) : `
+          <div class="card">
+            <div class="card-body" style="text-align: center; padding: 3rem;">
+              <p>Sélectionnez une leçon pour commencer</p>
+            </div>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+async function renderLessonViewer(courseId, lessonId) {
+  const data = await loadCourseDetail(courseId);
+  const lesson = data.lessons.find(l => l.id === lessonId);
+  if (!lesson) return '<div class="card"><div class="card-body">Leçon introuvable</div></div>';
+  
+  let content = '';
+  if (lesson.content_type === 'pdf') {
+    content = `<iframe src="${lesson.content_url}" style="width: 100%; height: 500px; border: none; border-radius: var(--radius);"></iframe>`;
+  } else {
+    content = `<video src="${lesson.content_url}" controls style="width: 100%; border-radius: var(--radius);"></video>`;
+  }
+  
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${lesson.title}</h3>
+        <p style="color: var(--gray);">${lesson.summary || ''}</p>
+      </div>
+      <div class="card-body">
+        ${content}
+      </div>
+      ${lesson.evaluation_id && state.user.role === 'student' && !lesson.is_validated ? `
+        <div class="card-footer">
+          <button class="btn btn-primary" onclick="window.startEvaluation(${courseId}, ${lesson.id})">📝 Passer l'évaluation</button>
+        </div>
+      ` : lesson.is_validated ? `
+        <div class="card-footer">
+          <div class="badge badge-success">✅ Leçon validée - Score: ${lesson.student_score}%</div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function renderEvaluation(courseId, lessonId) {
+  const evaluation = await loadEvaluation(lessonId);
+  if (!evaluation) return '<div class="card"><div class="card-body">Évaluation introuvable</div></div>';
+  
+  if (evaluation.hasSubmitted) {
+    return `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${evaluation.evaluation.title}</h3>
+        </div>
+        <div class="card-body" style="text-align: center;">
+          <p>Vous avez déjà complété cette évaluation.</p>
+          <p style="margin-top: 0.5rem;">Votre score: <strong>${evaluation.previousScore}%</strong></p>
+          <button class="btn btn-primary" onclick="window.viewCourse(${courseId})" style="margin-top: 1rem;">Retour au cours</button>
+        </div>
+      </div>
+    `;
+  }
+  
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${evaluation.evaluation.title}</h3>
+        <p>Score requis: ${evaluation.evaluation.pass_score}%</p>
+      </div>
+      <div class="card-body" id="evaluation-questions">
+        ${evaluation.questions.map((q, idx) => `
+          <div class="question-box" data-question-id="${q.id}">
+            <div class="question-text">${idx + 1}. ${q.question}</div>
+            <div class="options-list">
+              ${['A', 'B', 'C', 'D'].map(letter => `
+                <label class="option-item">
+                  <input type="radio" name="q_${q.id}" value="${letter}">
+                  <span><strong>${letter}.</strong> ${q[`option_${letter.toLowerCase()}`]}</span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="card-footer">
+        <button class="btn btn-primary" onclick="window.submitEvaluationFromForm(${courseId}, ${lessonId})">Soumettre mes réponses</button>
+      </div>
+    </div>
+  `;
+}
+
+// ==================== NAVIGATION ====================
+async function navigateTo(view) {
+  state.currentView = view;
+  await renderCurrentView();
+}
+
+async function viewCourse(courseId) {
+  state.currentView = 'course_detail';
+  state.currentCourse = { id: courseId };
+  state.currentLesson = null;
+  await renderCurrentView();
+}
+
+async function viewLesson(courseId, lessonId) {
+  state.currentLesson = lessonId;
+  await renderCurrentView();
+}
+
+async function startEvaluation(courseId, lessonId) {
+  state.currentView = 'evaluation';
+  state.currentCourse = { id: courseId };
+  state.currentLesson = lessonId;
+  await renderCurrentView();
+}
+
+async function renderCurrentView() {
+  if (!state.user) {
+    app.innerHTML = renderAuthScreen();
+    return;
+  }
+  
+  let content = '';
+  
+  switch (state.currentView) {
+    case 'overview':
+      content = await renderOverview();
+      break;
+    case 'modules':
+      content = await renderModules();
+      break;
+    case 'courses':
+      content = await renderCourses();
+      break;
+    case 'studio':
+      content = await renderStudio();
+      break;
+    case 'progress':
+      content = await renderProgress();
+      break;
+    case 'certificates':
+      content = await renderCertificates();
+      break;
+    case 'statistics':
+      content = await renderStatistics();
+      break;
+    case 'course_detail':
+      content = await renderCourseDetail(state.currentCourse.id);
+      break;
+    case 'evaluation':
+      content = await renderEvaluation(state.currentCourse.id, state.currentLesson);
+      break;
+    default:
+      content = await renderOverview();
+  }
+  
+  app.innerHTML = renderAppLayout(content);
+}
+
+// ==================== FORM HANDLERS ====================
+window.demoLogin = (email) => {
+  document.getElementById('login-email').value = email;
+  document.getElementById('login-password').value = 'password123';
+};
+
+window.switchAuthTab = (tab) => {
+  const loginForm = document.getElementById('login-form');
+  const registerForm = document.getElementById('register-form');
+  const tabs = document.querySelectorAll('.tab');
+  
+  if (tab === 'login') {
+    loginForm.style.display = 'block';
+    registerForm.style.display = 'none';
+    tabs[0].classList.add('active');
+    tabs[1].classList.remove('active');
+  } else {
+    loginForm.style.display = 'none';
+    registerForm.style.display = 'block';
+    tabs[0].classList.remove('active');
+    tabs[1].classList.add('active');
+  }
+};
+
+window.submitLogin = () => {
+  const email = document.getElementById('login-email').value;
+  const password = document.getElementById('login-password').value;
+  handleLogin(email, password);
+};
+
+window.submitRegister = () => {
+  const name = document.getElementById('register-name').value;
+  const email = document.getElementById('register-email').value;
+  const password = document.getElementById('register-password').value;
+  const role = document.getElementById('register-role').value;
+  handleRegister(name, email, password, role);
+};
+
+window.handleLogout = handleLogout;
+window.navigateTo = navigateTo;
+window.viewCourse = viewCourse;
+window.viewLesson = viewLesson;
+window.startEvaluation = startEvaluation;
+window.enrollCourse = enrollCourse;
+window.requestCertificate = requestCertificate;
+
+window.createModuleFromForm = () => {
+  const title = document.getElementById('module-title').value;
+  const description = document.getElementById('module-description').value;
+  const level = document.getElementById('module-level').value;
+  const threshold = document.getElementById('module-threshold').value;
+  if (title) createModule(title, description, level, parseInt(threshold));
+  else showToast('Veuillez saisir un titre', 'error');
+};
+
+window.createCourseFromForm = () => {
+  const moduleId = document.getElementById('course-module').value;
+  const title = document.getElementById('course-title').value;
+  const description = document.getElementById('course-description').value;
+  const coverFile = document.getElementById('course-cover').files[0];
+  if (title && moduleId) createCourse(moduleId, title, description, coverFile);
+  else showToast('Veuillez remplir tous les champs', 'error');
+};
+
+window.createLessonFromForm = () => {
+  const courseId = document.getElementById('lesson-course').value;
+  const title = document.getElementById('lesson-title').value;
+  const summary = document.getElementById('lesson-summary').value;
+  const contentType = document.getElementById('lesson-type').value;
+  const position = document.getElementById('lesson-position').value;
+  const file = document.getElementById('lesson-file').files[0];
+  if (courseId && title && file) createLesson(courseId, title, summary, contentType, parseInt(position), file);
+  else showToast('Veuillez remplir tous les champs', 'error');
+};
+
+window.loadLessonsForEval = async () => {
+  const courseId = document.getElementById('eval-course').value;
+  if (!courseId) return;
+  
+  const data = await loadCourseDetail(courseId);
+  const lessonSelect = document.getElementById('eval-lesson');
+  lessonSelect.innerHTML = '<option value="">Sélectionner une leçon</option>' + 
+    data.lessons.map(l => `<option value="${l.id}">${l.title}</option>`).join('');
+};
+
+let questionCounter = 0;
+
+window.addQuestion = () => {
+  questionCounter++;
+  const container = document.getElementById('questions-container');
+  const questionDiv = document.createElement('div');
+  questionDiv.className = 'question-box';
+  questionDiv.id = `question-${questionCounter}`;
+  questionDiv.innerHTML = `
+    <button class="btn btn-danger" style="float: right; padding: 0.25rem 0.5rem;" onclick="window.removeQuestion(${questionCounter})">✖</button>
+    <div class="form-group">
+      <label>Question</label>
+      <textarea id="q-${questionCounter}-text" rows="2" placeholder="Votre question..."></textarea>
+    </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+      <div class="form-group"><label>Option A</label><input type="text" id="q-${questionCounter}-a" placeholder="Option A"></div>
+      <div class="form-group"><label>Option B</label><input type="text" id="q-${questionCounter}-b" placeholder="Option B"></div>
+      <div class="form-group"><label>Option C</label><input type="text" id="q-${questionCounter}-c" placeholder="Option C"></div>
+      <div class="form-group"><label>Option D</label><input type="text" id="q-${questionCounter}-d" placeholder="Option D"></div>
+    </div>
+    <div class="form-group">
+      <label>Bonne réponse</label>
+      <select id="q-${questionCounter}-correct">
+        <option value="A">A</option>
+        <option value="B">B</option>
+        <option value="C">C</option>
+        <option value="D">D</option>
+      </select>
+    </div>
+  `;
+  container.appendChild(questionDiv);
+};
+
+window.removeQuestion = (id) => {
+  const questionDiv = document.getElementById(`question-${id}`);
+  if (questionDiv) questionDiv.remove();
+};
+
+window.saveEvaluationFromForm = async () => {
+  const lessonId = document.getElementById('eval-lesson').value;
+  const title = document.getElementById('eval-title').value;
+  const passScore = document.getElementById('eval-pass-score').value;
+  
+  if (!lessonId || !title) {
+    showToast('Veuillez sélectionner une leçon et saisir un titre', 'error');
+    return;
+  }
+  
+  const questions = [];
+  for (let i = 1; i <= questionCounter; i++) {
+    const questionDiv = document.getElementById(`question-${i}`);
+    if (questionDiv) {
+      const questionText = document.getElementById(`q-${i}-text`)?.value;
+      if (questionText) {
+        questions.push({
+          question: questionText,
+          option_a: document.getElementById(`q-${i}-a`).value,
+          option_b: document.getElementById(`q-${i}-b`).value,
+          option_c: document.getElementById(`q-${i}-c`).value,
+          option_d: document.getElementById(`q-${i}-d`).value,
+          correct_option: document.getElementById(`q-${i}-correct`).value
+        });
+      }
     }
-    if (certBtn) {
-      await api(`/api/modules/${certBtn.dataset.certificateModule}/certificate`, { method: 'POST' });
-      toast('Certificat généré');
-      navigate('certificates');
+  }
+  
+  if (questions.length === 0) {
+    showToast('Ajoutez au moins une question', 'error');
+    return;
+  }
+  
+  await saveEvaluation(lessonId, title, parseInt(passScore), questions);
+};
+
+window.submitEvaluationFromForm = async (courseId, lessonId) => {
+  const answers = {};
+  const questions = document.querySelectorAll('.question-box');
+  
+  for (const question of questions) {
+    const questionId = question.dataset.questionId;
+    const selected = question.querySelector(`input[name="q_${questionId}"]:checked`);
+    if (selected) {
+      answers[questionId] = selected.value;
     }
-  } catch (error) {
-    toast(error.message, 'error');
   }
-});
-
-document.querySelectorAll('[data-demo]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    $('#login-form [name=email]').value = btn.dataset.demo;
-    $('#login-form [name=password]').value = 'password123';
-  });
-});
-
-document.querySelectorAll('[data-auth-tab]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const isLogin = btn.dataset.authTab === 'login';
-    document.querySelectorAll('[data-auth-tab]').forEach(tab => tab.classList.toggle('active', tab === btn));
-    $('#login-form').classList.toggle('hidden', !isLogin);
-    $('#register-form').classList.toggle('hidden', isLogin);
-  });
-});
-
-$('#login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    const data = await api('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(serialize(e.target))
-    });
-    saveSession(data);
-    showApp();
-  } catch (error) {
-    $('#auth-message').textContent = error.message;
+  
+  const result = await submitEvaluation(lessonId, answers);
+  if (result) {
+    showToast(result.message, result.passed ? 'success' : 'error');
+    await viewCourse(courseId);
   }
-});
+};
 
-$('#register-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    const data = await api('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify(serialize(e.target))
-    });
-    saveSession(data);
-    showApp();
-  } catch (error) {
-    $('#auth-message').textContent = error.message;
+// ==================== INITIALISATION ====================
+renderApp();
+
+async function renderApp() {
+  if (state.token && state.user) {
+    await renderCurrentView();
+  } else {
+    app.innerHTML = renderAuthScreen();
   }
-});
-
-document.querySelectorAll('.nav').forEach(btn => {
-  btn.addEventListener('click', () => navigate(btn.dataset.view));
-});
-
-$('#logout').addEventListener('click', logout);
-
-// Initialisation
-if (state.token && state.user) {
-  showApp();
-} else {
-  logout();
 }
