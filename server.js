@@ -7,22 +7,8 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { Pool } = require("pg");
-const rateLimit = require("express-rate-limit");
-const helmet = require("helmet");
 
 const app = express();
-
-// Security middleware
-app.use(helmet({
-  contentSecurityPolicy: false,
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
-app.use("/api/", limiter);
 
 // Configuration
 const upload = multer({
@@ -327,6 +313,8 @@ async function seedDemo() {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(PUBLIC_DIR));
+app.use("/uploads", express.static(UPLOAD_DIR));
 
 // Auth routes
 app.post("/api/auth/register", asyncHandler(async (req, res) => {
@@ -469,7 +457,7 @@ app.delete("/api/modules/:id", auth(["promoter"]), asyncHandler(async (req, res)
   res.json({ message: "Module supprimé" });
 }));
 
-// Courses (Teacher)
+// Courses
 app.get("/api/courses", auth(), asyncHandler(async (req, res) => {
   let query_text = `
     SELECT c.*, m.title AS module_title, u.name AS teacher_name,
@@ -516,21 +504,7 @@ app.post("/api/courses", auth(["teacher"]), upload.single("cover"), asyncHandler
   res.status(201).json({ message: "Cours créé avec succès", courseId: result.rows[0].id });
 }));
 
-app.put("/api/courses/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
-  const { title, description, status } = req.body;
-  
-  await pool.query(
-    `UPDATE courses 
-     SET title = $1, description = $2, status = $3
-     WHERE id = $4 AND teacher_id = $5`,
-    [title, description, status, req.params.id, req.user.id]
-  );
-  
-  res.json({ message: "Cours mis à jour" });
-}));
-
 app.post("/api/courses/:id/enroll", auth(["student"]), asyncHandler(async (req, res) => {
-  // Vérifier si déjà inscrit
   const existing = await pool.query(
     "SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2",
     [req.user.id, req.params.id]
@@ -576,7 +550,7 @@ app.get("/api/courses/:id", auth(), asyncHandler(async (req, res) => {
   res.json({ course: courseResult.rows[0], lessons: lessons.rows });
 }));
 
-// Lessons (Teacher)
+// Lessons
 app.post("/api/courses/:id/lessons", auth(["teacher"]), upload.single("content"), asyncHandler(async (req, res) => {
   const { title, summary, content_type, position } = req.body;
   
@@ -609,25 +583,7 @@ app.post("/api/courses/:id/lessons", auth(["teacher"]), upload.single("content")
   res.status(201).json({ message: "Leçon ajoutée avec succès", lessonId: result.rows[0].id });
 }));
 
-app.put("/api/lessons/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
-  const { title, summary, position } = req.body;
-  
-  await pool.query(
-    `UPDATE lessons 
-     SET title = $1, summary = $2, position = $3
-     WHERE id = $4`,
-    [title, summary, position, req.params.id]
-  );
-  
-  res.json({ message: "Leçon mise à jour" });
-}));
-
-app.delete("/api/lessons/:id", auth(["teacher"]), asyncHandler(async (req, res) => {
-  await pool.query("DELETE FROM lessons WHERE id = $1", [req.params.id]);
-  res.json({ message: "Leçon supprimée" });
-}));
-
-// Evaluations (Teacher)
+// Evaluations
 app.post("/api/lessons/:id/evaluation", auth(["teacher"]), asyncHandler(async (req, res) => {
   const { title, pass_score, questions } = req.body;
   
@@ -715,7 +671,6 @@ app.get("/api/lessons/:id/evaluation", auth(), asyncHandler(async (req, res) => 
   });
 }));
 
-// Submit evaluation (Student)
 app.post("/api/lessons/:id/submit", auth(["student"]), asyncHandler(async (req, res) => {
   const { answers } = req.body;
   
@@ -795,7 +750,7 @@ app.post("/api/lessons/:id/submit", auth(["student"]), asyncHandler(async (req, 
   });
 }));
 
-// Progress (Student)
+// Progress
 app.get("/api/progress", auth(["student"]), asyncHandler(async (req, res) => {
   const progress = await pool.query(
     `SELECT c.id AS course_id, c.title AS course_title, 
@@ -833,7 +788,7 @@ app.get("/api/progress", auth(["student"]), asyncHandler(async (req, res) => {
   res.json(progress.rows);
 }));
 
-// Certificates (Student & Promoter)
+// Certificates
 app.post("/api/modules/:id/certificate", auth(["student"]), asyncHandler(async (req, res) => {
   const moduleId = req.params.id;
   
@@ -922,7 +877,7 @@ app.get("/api/certificates", auth(), asyncHandler(async (req, res) => {
   res.json(certificates.rows);
 }));
 
-// Statistics (Promoter)
+// Statistics
 app.get("/api/statistics", auth(["promoter"]), asyncHandler(async (req, res) => {
   const stats = await pool.query(`
     SELECT 
@@ -961,10 +916,6 @@ app.get("/api/health", asyncHandler(async (req, res) => {
     environment: process.env.NODE_ENV || "development"
   });
 }));
-
-// Static files
-app.use(express.static(PUBLIC_DIR));
-app.use("/uploads", express.static(UPLOAD_DIR));
 
 // SPA fallback
 app.get("*", (req, res) => {
@@ -1012,12 +963,6 @@ async function start() {
       console.log("   👑 Promoteur: promoter@brain-vision.com / password123");
       console.log("   👨‍🏫 Enseignant: teacher@brain-vision.com / password123");
       console.log("   👨‍🎓 Étudiant: student@brain-vision.com / password123");
-      console.log("\n✨ Fonctionnalités:");
-      console.log("   - Modules de cours par le promoteur");
-      console.log("   - Création de cours avec leçons (PDF/Vidéo)");
-      console.log("   - Évaluations par leçon avec questions");
-      console.log("   - Progression automatique en %");
-      console.log("   - Certificats de validation de module\n");
     });
     
   } catch (error) {
